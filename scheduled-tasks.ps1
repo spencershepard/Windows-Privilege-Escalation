@@ -11,19 +11,15 @@ if ($args -contains "-v") {
 
 $currentUser = whoami
 
-Write-Host "Starting Scheduled Tasks vulnerability scanner for user $currentUser"
+Write-Host "Starting Scheduled Tasks vulnerability scanner for user $currentUser" -ForegroundColor Blue
+Write-Host ""
 
 # Get the tasks
 $scheduledTasks = schtasks /query /v /fo csv | ConvertFrom-Csv
 
-$paths = @()
-
-foreach ($task in $scheduledTasks) {
-
-    $binaryPath = $task.'Task To Run'
-
+function getTaskPath($taskToRun) {
     # Remove arguements from the binary path (split strings on whitespace followed by / or - or $(
-    $binaryPath = $binaryPath -split '\s+[-/$\(]' | Select-Object -First 1
+    $binaryPath = $taskToRun -split '\s+[-/$\(]' | Select-Object -First 1
 
     # Remove stray quotes
     $binaryPath = $binaryPath -replace '"', ''
@@ -33,8 +29,20 @@ foreach ($task in $scheduledTasks) {
         if ($verbose) {
             Write-Host "Skipping 'Task To Run' $binaryPath as it is not a valid path"
         }
-        continue
+        return $null
     }
+
+    $binaryPath = $binaryPath.Trim()
+
+    return $binaryPath
+
+}
+
+$paths = @()
+
+foreach ($task in $scheduledTasks) {
+
+    $binaryPath = getTaskPath($task.'Task To Run')
 
     # Add the binary path to the list if not already in it
     if ($binaryPath -notin $paths) {
@@ -43,10 +51,11 @@ foreach ($task in $scheduledTasks) {
             Write-Host "Unique binary path:" $binaryPath
         }
     }
-    
+
 }
 
 Write-Host "Found" $paths.Length "unique binary paths. Testing if any are writable..."
+Write-Host ""
 
 $writeablePaths = @()
 
@@ -54,17 +63,59 @@ $writeablePaths = @()
 foreach ($path in $paths) {
     Try {
         [io.file]::OpenWrite($path).close()
-        Write-Host "Binary $path is writable by $currentUser" -ForegroundColor Red
+        Write-Host "Binary $path is writable by $currentUser"
+        Write-Host ""
         $writeablePaths += $path
     }
     Catch {  }
 }
 
 if ($writeablePaths.Length -eq 0) {
-    Write-Host "No writable binaries found" -ForegroundColor Green
-    Exit 0
+    Write-Host "No writable binaries found" -ForegroundColor Red
+    Exit 1
 }
 
-Write-Host "Found" $writeablePaths.Length "writable binaries.  If the scheduled tasks run as a higher privileged user, this is exploitable."
+Write-Host "Found" $writeablePaths.Length "writable binaries.  If the scheduled tasks run as a higher privileged user, this is exploitable. Checking..."
+Write-Host ""
 
-Exit 1
+
+function tasksFromPath($path) {
+    $tasks = @()
+    foreach ($task in $scheduledTasks) {
+        $taskpath = getTaskPath($task.'Task To Run')
+        if ($taskpath -eq $path) {
+            $tasks += $task
+        }
+    }
+    return $tasks
+}
+
+
+$exploitableTasks = @()
+
+foreach ($path in $writeablePaths) {
+    $tasks = tasksFromPath($path)
+    Write-Host ""
+    if ($verbose) {
+        Write-Host "Binary $path is writable by $currentUser.  Checking if any tasks run it as a different user..."
+    }
+    foreach ($task in $tasks) {
+        if ($task.'Run As User' -ne $currentUser) {
+            Write-Host "You can write to the binary and the task runs as a different user. Potentially exploitable task:" -ForegroundColor Yellow
+            Write-Host "Task Name:" $task.TaskName
+            Write-Host "Run As User:" $task.'Run As User'
+            Write-Host "Binary Path:" $path
+            Write-Host ""
+            $exploitableTasks += $task
+        }
+    }
+}
+
+if ($exploitableTasks.Length -eq 0) {
+    Write-Host "No exploitable tasks found" -ForegroundColor Red
+    Exit 1
+}
+else {
+    Write-Host "Found" $exploitableTasks.Length "exploitable tasks" -ForegroundColor Green
+    Exit 0
+}
